@@ -1,6 +1,6 @@
 name: astrbot_sowing_discord
 desc: anka - 搬史插件, 设置史的来源并且转发到指定群(默认全部), 你需要进行设置
 help: anka - 搬史插件, 设置史的来源并且转发到指定群(默认全部), 你需要进行设置
-version: v0.915
+version: v0.916
 author: anka
 repo: https://github.com/anka-afk/astrbot_sowing_discord
