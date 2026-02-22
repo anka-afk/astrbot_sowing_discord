@@ -90,25 +90,27 @@ class Sowing_Discord(Star):
         if not self.banshi_target_list:
             self.banshi_target_list = await self.get_group_list(event)
 
-        raw_message = event.message_obj.raw_message
-        message_list = (
-            raw_message.get("message") if isinstance(raw_message, dict) else None
-        )
-        is_forward = (
-            message_list is not None
-            and isinstance(message_list, list)
-            and message_list
-            and isinstance(message_list[0], dict)
-            and message_list[0].get("type") == "forward"
-        )
+        if is_in_source_list:
+            # 【修复点1】防止非数字 ID（如哈希字符）混入导致 int() 转换抛出崩溃异常
+            try:
+                int(msg_id)
+                await self.local_cache.add_cache(msg_id)
+                logger.info(
+                    f"[SowingDiscord][ID:{self.instance_id}] 任务：缓存。已缓存消息 (ID: {msg_id}, 源头群: {source_group_id}, 发送者: {sender_id})。"
+                )
+            except (ValueError, TypeError):
+                logger.warning(
+                    f"[SowingDiscord][ID:{self.instance_id}] 拦截异常：消息 ID [{msg_id}] 不是有效的纯数字形式，底层 API 无法获取此转发，跳过缓存。"
+                )
 
-        if is_forward and is_in_source_list:
-            await self.local_cache.add_cache(msg_id)
-            logger.info(
-                f"[SowingDiscord][ID:{self.instance_id}] 任务：缓存。已缓存转发消息 (ID: {msg_id}, 源头群: {source_group_id}, 发送者: {sender_id})。"
+        # 【修复点2】包裹错误捕捉，确保就算缓存里真残留了脏数据，也不会中断其他机器人的模块处理
+        try:
+            waiting_messages = await self.local_cache.get_waiting_messages()
+        except ValueError as e:
+            logger.error(
+                f"[SowingDiscord][ID:{self.instance_id}] 缓存严重损坏！遇到了无法转换为数字的旧数据：{e}。请进入插件目录删掉损坏的缓存文件！"
             )
-
-        waiting_messages = await self.local_cache.get_waiting_messages()
+            waiting_messages = []
 
         # 转发/冷却逻辑
         if waiting_messages:
@@ -142,7 +144,10 @@ class Sowing_Discord(Star):
                     f"[SowingDiscord][ID:{self.instance_id}] 转发前自动清理了 {cleaned_count} 条超出最大缓存时长的消息。"
                 )
 
-            waiting_messages = await self.local_cache.get_waiting_messages()
+            try:
+                waiting_messages = await self.local_cache.get_waiting_messages()
+            except ValueError:
+                waiting_messages = []
 
             async with self.forward_lock:
                 logger.info(
