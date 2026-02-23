@@ -44,5 +44,12 @@
     "type": "bool",
     "hint": "开启后将屏蔽banshi_group_list中的群消息",
     "default": true
+  },
+  "allowed_message_types": {
+    "type": "list",
+    "default": ["text", "image", "video", "forward"],
+    "description": "允许转发的消息类型",
+    "hint": "可选: text(文本), image(图片), video(视频), forward(聊天记录/合并转发)。如果消息包含未被允许的媒体类型，将被拒绝转发。",
+    "options": ["text", "image", "video", "forward"]
   }
 }
