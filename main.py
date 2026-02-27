@@ -125,7 +125,13 @@ class Sowing_Discord(Star):
 
         source_group_id = event.message_obj.group_id
         msg_id = event.message_obj.message_id
-        is_in_source_list = source_group_id in self.banshi_group_list
+        
+        # 将群号统一转为字符串进行判定，防止因格式不同（int/str）导致匹配失败
+        is_in_source_list = str(source_group_id) in [str(g) for g in self.banshi_group_list]
+
+        # 【核心修复】如果是源群消息，且开启了屏蔽源群选项，立即拦截事件，阻止大模型和下游插件响应！
+        if is_in_source_list and self.block_source_messages:
+            event.stop_event()
 
         sender_id = event.get_sender_id()
 
@@ -159,17 +165,13 @@ class Sowing_Discord(Star):
 
         if waiting_messages:
             if not self.forward_lock.locked():
-                await self._execute_forward_and_cool(
-                    event, forward_manager, evaluator, waiting_messages
-                )
-
-        if self.block_source_messages and is_in_source_list:
-            return MessageEventResult(None)
+                # 【优化】将其作为后台任务运行，避免冷却期的 sleep 卡死事件循环，导致其他消息无响应
+                asyncio.create_task(self._execute_forward_and_cool(event, forward_manager, evaluator))
 
         return None
 
     async def _execute_forward_and_cool(
-        self, event, forward_manager, evaluator, waiting_messages
+        self, event, forward_manager, evaluator
     ):
         client = event.bot
 
@@ -183,6 +185,7 @@ class Sowing_Discord(Star):
                 )
 
             try:
+                # 重新获取最新的待转发列表
                 waiting_messages = await self.local_cache.get_waiting_messages()
             except ValueError:
                 waiting_messages = []
