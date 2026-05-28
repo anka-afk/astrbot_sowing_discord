@@ -35,7 +35,7 @@
 
 请前往发布页加群:
 发布页:
-https://ankaanka.me/sowing_discord_center/
+https://sowingdiscord.ankaanka.org
 收藏发布页不迷路~
 所有群，包括聊天群（请在聊天群聊天）请从入口群加入，因为所有群基本都无法搜索了，入口群群简介有其他群链接和群号，入口群加入其他群后可以退出（或者你可以不加这个群，这个群将会永久禁言)。
 
