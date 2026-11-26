@@ -1,6 +1,11 @@
 name: astrbot_sowing_discord
-desc: anka - 搬史插件, 设置史的来源并且转发到指定群(默认全部), 你需要进行设置
-help: anka - 搬史插件, 设置史的来源并且转发到指定群(默认全部), 你需要进行设置
-version: v0.916
-author: anka
+desc: 搬史自动化 2.0：多源可插拔跨平台群聊搬史插件，支持官方/多 Hub 联邦、通用 RSS、事件驱动本地源群、五态读空气、本地脱敏投稿与匿名众包反馈
+help: |
+  常用指令：
+  - /来坨史 [标签]（兼容别名 /搬史）：手动拉取一条史发送到当前群
+  - /投稿 [标签/附言]：引用消息或附带图文投稿至 Hub（自动本地脱敏与去重早停）
+  - /烂史 [原因]：引用 Bot 搬运的消息进行踩/举报
+  - /史库 <状态|开关|订阅|屏蔽|分级|读空气>：查看状态与按群配置
+version: 2.0.0
+author: Anka
 repo: https://github.com/anka-afk/astrbot_sowing_discord

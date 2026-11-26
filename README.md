@@ -1,87 +1,46 @@
-# 🤖 Astrbot Sowing_discord 模块 - 搬史插件
-
-<div align="center">
+# 🤖 AstrBot Sowing Discord v2 — 搬史自动化 2.0
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-![Python Version](https://img.shields.io/badge/Python-3.10.14%2B-blue)
-![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
-[![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen)](CONTRIBUTING.md)
-[![Contributors](https://img.shields.io/github/contributors/anka-afk/astrbot_plugin_meme_manager?color=green)](https://github.com/anka-afk/astrbot_plugin_meme_manager/graphs/contributors)
-[![Last Commit](https://img.shields.io/github/last-commit/anka-afk/astrbot_plugin_meme_manager)](https://github.com/anka-afk/astrbot_plugin_meme_manager/commits/main)
+![Python Version](https://img.shields.io/badge/Python-3.10%2B-blue)
+![Version](https://img.shields.io/badge/Version-2.0.0-purple)
 
-</div>
+> 彻底告别 v1「全员 Bot 加 QQ 源群 + 暴力轮询贴表情 + 风控连坐 + 仅支持 QQ」架构，迈入**零加群、全平台、读空气、社区众包共建**的搬史新时代！
 
-<div align="center">
+## ✨ v2.0 重大升级
 
-[![Moe Counter](https://count.getloli.com/get/@GalChat?theme=moebooru)](https://github.com/anka-afk/astrbot_sowing_discord)
+- **零加群开箱即用**：默认直连公益中心站 Hub（[sowing-discord-hub](https://github.com/anka-afk/sowing-discord-hub)），后台自动完成轻量 16-bit SHA-256 PoW 匿名注册，无需让 Bot 加入任何公共 QQ 源群，大幅降低封号与源群连坐风险。
+- **真正跨平台 & 零重依赖**：基于 AstrBot 通用 `MessageChain` 发送，支持 **QQ / Telegram / Discord / 微信 / 企微 / 飞书**；聊天记录由审核台浏览器端预渲染为 `720×≤1800` 高清 WebP 切片（QQ 端也可选尝试原生合并转发并自动回退），插件端零 Playwright/Chromium 依赖。
+- **多源可插拔架构 (`Source -> Pipeline -> Sink`)**：
+  - 官方公益 Hub & 多自定义 Hub 联邦订阅（`after_seq` + `ETag`/`304` + 下架墓碑 `tombstones` 秒级清缓存）
+  - 通用 RSS / Atom / RSSHub 图文订阅（纯 Python 标准库解析）
+  - 保留本地自用源群模式，彻底废除暴力轮询，改用 OneBot `group_msg_emoji_like` 被动事件驱动
+- **五态「读空气」智能破冰**：纯内存滑动窗口区分免打扰、冷却、热聊中（绝不打断）、死群（绝不空投刷屏）、刚冷场破冰（上条无人理自动冷却翻倍退避）。
+- **社区共建闭环**：群内回复消息发送 `/投稿 [标签]` 自动本地脱敏（抹除真实 QQ/群号/头像，映射为 `群友A/B`）并上传查重；可选开启群友互动匿名反馈与用户自有 LLM 简短吐槽（5s 硬超时静默降级）。
+- **v1 → v2 无损平滑迁移**：升级启动时自动检测旧版 `banshi_*` 配置，先备份 `config.v1.bak.json` 并自动映射目标群与本地源群。
 
-</div>
+## 🛠️ 常用指令
 
-让 AI 学会搬史, 搬史进入新时代! 全自动搬史!
+| 指令 | 说明 |
+| :--- | :--- |
+| `/来坨史 [标签]`（别名 `/搬史`） | 手动从史库拉取一条未发过的好史发送到当前群 |
+| `/投稿 [标签/附言]` | 引用任意群消息或附带图文投稿至 Hub（自动本地脱敏 + 重复早停，拦截原始视频） |
+| `/烂史 [原因]` | 引用 Bot 搬运的消息反馈点踩或举报（原因：`nsfw_unmarked` / `privacy_leak` / `duplicate` 等） |
+| `/史库 <状态\|开关\|订阅\|屏蔽\|分级\|读空气>` | 群管免改配置热查看状态与调整群级策略 |
 
-## 📢 公告
+## ⚙️ 主要配置项（AstrBot WebUI 可视化配置）
 
-# 近期计划更新
+- `official_hub_enabled` / `official_hub_url`：是否启用官方 Hub 及 API 根地址（默认 `https://api.banshi.ankaanka.org`，可随时指向自建 Hub）。
+- `extra_hubs` / `rss_sources`：追加多个联邦 Hub 或 RSS/RSSHub 图文源。
+- `local_onebot_groups` / `local_emoji_threshold`：可选本地事件驱动源群与贴表情阈值。
+- `target_groups` / `default_max_nsfw` / `default_blocked_tags`：目标搬史群、内容分级上限（`0` 安全 / `1` 轻度敏感 / `2` 高能预警）及屏蔽标签。
+- `ambient_enabled` / `quiet_hours` / `cooldown_sec`：五态「读空气」投放参数。
+- `llm_comment_prob` / `qq_native_forward`：可选用户自有 LLM 吐槽概率、QQ 端优先原生合并转发开关。
 
-本项目为公益项目, 不接受任何赞助, 所有服务均为免费提供, 所有付费服务与广告都是骗人的, 请不要相信并向作者报告
+## 🔗 相关项目与发布页
 
-如果您想加入群聊, 为项目做出贡献, 请添加:
-
-请前往发布页加群:
-
-发布页:
-
-https://sowingdiscord.ankaanka.org
-
-收藏发布页不迷路~
-
-所有群，包括聊天群（请在聊天群聊天）请从入口群加入，因为所有群基本都无法搜索了，入口群群简介有其他群链接和群号，入口群加入其他群后可以退出（或者你可以不加这个群，这个群将会永久禁言)。
-
-- 群聊的答案都是**保证可以搜索的**， 你并不需要懂得答案的由来, 你只是需要证明具有基础的搜索与解决问题的能力 
-
-注意, 不要相信任何你无法准确证明真实的消息, 这可能是谣言
-
-## ❓ 常见问题
-
-1. **Q: 为什么我的 bot 没有自动搬史?**
-
-   - A: 插件逻辑如下:
-     - 1. 插件会从指定的群聊(搬史源头)中获取消息, 并缓存消息
-     - 2. 10 分钟后, 插件会获取消息的贴表情信息, 如果满足评价条件(好史), 就会触发搬史
-     - 3. 因此你至少需要等待 10 分钟, 插件才会开始搬史
-
-## ✨ 功能
-
-- 🚫 自动从指定的群聊(推荐加入 1032915502, 共建搬史中心), 转发聊天记录(史)到其他指定的群聊(详见设置)
-
-## 🛠️ 使用方法
-
-1. 加入天天发史的群聊
-2. 设置该群聊为搬史源头, 设置目标群聊
-3. bot 开始全自动搬史!
-
-## ⚙️ 配置说明
-
-插件配置项包括：
-
-- `banshi_interval`: 搬史间隔, 单位: 秒（兼容项，实际冷却由时间段动态决定）
-- `banshi_cache_seconds`: 消息缓存时间限制, 也是转发前检查历史消息的时间窗口 (秒)
-- `banshi_cooldown_day_seconds`: 动态冷却-白天冷却秒数（默认 600）
-- `banshi_cooldown_night_seconds`: 动态冷却-夜间冷却秒数（默认 3600）
-- `banshi_cooldown_day_start`: 动态冷却-白天时段起始时间（HH:MM，默认 09:00）
-- `banshi_cooldown_night_start`: 动态冷却-夜间时段起始时间（HH:MM，默认 01:00）
-- `banshi_group_list`: 史的来源群列表
-- `banshi_target_list`: 白名单, 史的目标列表, 可以填写多个群或用户, 默认空白即全部群
-- `block_source_messages`: 开启后将屏蔽 banshi_group_list 中的群消息
-
-## 👥 贡献指南
-
-欢迎通过以下方式参与项目：
-
-- 🐛 提交 Issue 报告问题
-- 💡 提出新功能建议
-- 🔧 提交 Pull Request 改进代码
+- 中心站服务端、Web 广场与极速审核台、单号采集器：[anka-afk/sowing-discord-hub](https://github.com/anka-afk/sowing-discord-hub)
+- 官方发布页：https://sowingdiscord.ankaanka.org
 
 ## 📄 许可证
 
-本项目基于 MIT 许可证开源。
+MIT License

@@ -1,55 +1,153 @@
 {
-  "banshi_interval": {
-    "type": "int",
-    "default": 30,
-    "description": "搬史间隔, 单位: 秒"
-  },
-  "banshi_cache_seconds": {
-    "type": "int",
-    "default": 3600,
-    "description": "消息缓存时间限制, 也是转发前检查历史消息的时间窗口 (秒)"
-  },
-  "banshi_cooldown_day_seconds": {
-    "type": "int",
-    "default": 600,
-    "description": "动态冷却：白天(09:00-01:00) 冷却秒数"
-  },
-  "banshi_cooldown_night_seconds": {
-    "type": "int",
-    "default": 3600,
-    "description": "动态冷却：夜间(01:00-09:00) 冷却秒数"
-  },
-  "banshi_cooldown_day_start": {
-    "type": "string",
-    "default": "09:00",
-    "description": "动态冷却：白天时段起始时间 (HH:MM)"
-  },
-  "banshi_cooldown_night_start": {
-    "type": "string",
-    "default": "01:00",
-    "description": "动态冷却：夜间时段起始时间 (HH:MM)"
-  },
-  "banshi_group_list": {
-    "type": "list",
-    "default": ["1032915502"],
-    "description": "史的来源群列表"
-  },
-  "banshi_target_list": {
-    "type": "list",
-    "default": [],
-    "description": "白名单, 史的目标列表, 可以填写多个群或用户, 默认空白即全部群"
-  },
-  "block_source_messages": {
-    "description": "是否屏蔽源群消息",
+  "official_hub_enabled": {
+    "description": "启用官方公益 Hub",
     "type": "bool",
-    "hint": "开启后将屏蔽banshi_group_list中的群消息",
+    "hint": "默认开启，无需 Bot 加入任何公共 QQ 群即可直连官方公益内容库",
     "default": true
   },
-  "allowed_message_types": {
+  "official_hub_url": {
+    "description": "官方 Hub 地址",
+    "type": "string",
+    "hint": "官方公益 Hub API 根地址（不含 /api/v1 后缀）",
+    "default": "https://api.banshi.ankaanka.org"
+  },
+  "user_token": {
+    "description": "可信投稿人令牌 (X-User-Token)",
+    "type": "string",
+    "hint": "可选。在网站绑定的可信投稿人 Token，用于 /投稿 高优审核通道",
+    "default": ""
+  },
+  "extra_hubs": {
+    "description": "额外联邦 Hub 列表",
     "type": "list",
-    "default": ["text", "image", "video", "forward"],
-    "description": "允许转发的消息类型",
-    "hint": "可选: text(文本), image(图片), video(视频), forward(聊天记录/合并转发)。如果消息包含未被允许的媒体类型，将被拒绝转发。",
-    "options": ["text", "image", "video", "forward"]
+    "hint": "可填多个自定义 Hub URL 或 JSON 字符串（如 {\"id\":\"my-hub\",\"url\":\"https://...\",\"enabled\":true,\"user_token\":\"\"}）",
+    "default": []
+  },
+  "submit_hub_id": {
+    "description": "默认投稿目标 Hub ID",
+    "type": "string",
+    "hint": "/投稿 默认投递的 Hub ID，默认为 official-main",
+    "default": "official-main"
+  },
+  "rss_sources": {
+    "description": "通用 RSS/Atom/RSSHub 图文源列表",
+    "type": "list",
+    "hint": "填写 RSS/Atom 订阅 URL，插件使用纯标准库自动解析图文条目",
+    "default": []
+  },
+  "local_onebot_groups": {
+    "description": "本地事件驱动源群列表 (OneBot)",
+    "type": "list",
+    "hint": "可选。仅监听 group_msg_emoji_like 贴表情事件，彻底废除旧版轮询；v1 的 banshi_group_list 将自动迁入此处",
+    "default": []
+  },
+  "local_emoji_threshold": {
+    "description": "本地源群贴表情采集阈值",
+    "type": "int",
+    "hint": "单条消息净贴表情数达到该阈值时触发单次 get_msg 采集入库",
+    "default": 3
+  },
+  "target_groups": {
+    "description": "目标搬史群列表",
+    "type": "list",
+    "hint": "支持 unified_msg_origin 或纯群号；v1 的 banshi_target_list 将自动迁入此处",
+    "default": []
+  },
+  "default_max_nsfw": {
+    "description": "默认群 NSFW 分级上限",
+    "type": "int",
+    "hint": "0=全年龄安全, 1=轻度敏感(默认), 2=高能预警(需群主显式开启)",
+    "options": [0, 1, 2],
+    "default": 1
+  },
+  "default_blocked_tags": {
+    "description": "全局默认屏蔽标签",
+    "type": "list",
+    "hint": "命中这些标签的条目不会自动推送",
+    "default": []
+  },
+  "ambient_enabled": {
+    "description": "全局启用「读空气」自动破冰投放",
+    "type": "bool",
+    "hint": "仅在群聊刚冷场时投放，热聊不打断、死群不刷屏",
+    "default": true
+  },
+  "ambient_check_interval_sec": {
+    "description": "读空气扫描周期 (秒)",
+    "type": "int",
+    "hint": "后台检查各目标群是否进入 LULL_READY 窗口的间隔秒数",
+    "default": 60
+  },
+  "quiet_hours": {
+    "description": "默认免打扰时段",
+    "type": "string",
+    "hint": "24 小时制 HH:MM-HH:MM，支持跨零点，例如 01:00-08:00",
+    "default": "01:00-08:00"
+  },
+  "cooldown_sec": {
+    "description": "默认搬史冷却时间 (秒)",
+    "type": "int",
+    "hint": "同一群两次自动搬史的最小间隔，默认 5400 秒（90 分钟）",
+    "default": 5400
+  },
+  "active_chat_threshold_5m": {
+    "description": "热聊判定阈值 (近 5 分钟人类消息数)",
+    "type": "int",
+    "hint": "近 5 分钟人类消息数 >= 该值时判定为 ACTIVE_CHAT，绝不打断",
+    "default": 6
+  },
+  "lull_min_sec": {
+    "description": "冷场窗口下限 (秒)",
+    "type": "int",
+    "hint": "距最后一条人类消息至少经过该秒数才视为进入冷场，默认 900 秒（15 分钟）",
+    "default": 900
+  },
+  "lull_max_sec": {
+    "description": "冷场窗口上限 (秒)",
+    "type": "int",
+    "hint": "距最后一条人类消息不超过该秒数视为刚冷场窗口，默认 2700 秒（45 分钟）",
+    "default": 2700
+  },
+  "dead_group_sec": {
+    "description": "死群判定时长 (秒)",
+    "type": "int",
+    "hint": "超过该时长无人类发言则判定为 DEAD_GROUP，禁止空投刷屏，默认 86400 秒（24 小时）",
+    "default": 86400
+  },
+  "llm_comment_prob": {
+    "description": "LLM 简短吐槽触发概率",
+    "type": "float",
+    "hint": "0.0 ~ 1.0。复用 AstrBot 已配置 LLM Provider，仅喂 title+summary+tags，5s 超时静默降级",
+    "default": 0.3
+  },
+  "llm_timeout_sec": {
+    "description": "LLM 吐槽超时上限 (秒)",
+    "type": "float",
+    "hint": "硬超时秒数，超时静默降级为无吐槽原样发送",
+    "default": 5.0
+  },
+  "qq_native_forward": {
+    "description": "QQ 端优先尝试原生合并转发聊天记录",
+    "type": "bool",
+    "hint": "仅对 aiocqhttp 平台的 chat_record 生效；若原生转发失败自动无缝回退为 rendered_images 切片图",
+    "default": false
+  },
+  "media_cache_max_mb": {
+    "description": "本地媒体缓存容量上限 (MB)",
+    "type": "int",
+    "hint": "LRU 自动淘汰上限，默认 200MB",
+    "default": 200
+  },
+  "sync_interval_sec": {
+    "description": "内容源后台同步间隔 (秒)",
+    "type": "int",
+    "hint": "Hub / RSS 定期增量同步间隔，默认 300 秒",
+    "default": 300
+  },
+  "feedback_flush_interval_sec": {
+    "description": "匿名反馈批量上报间隔 (秒)",
+    "type": "int",
+    "hint": "定时批量上报 feedback_outbox 至 Hub（每批 <=50 条），默认 120 秒",
+    "default": 120
   }
 }
