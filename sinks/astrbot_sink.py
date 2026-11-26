@@ -137,15 +137,23 @@ class AstrBotSink:
                 logger.warning("Local media cache download failed for %s: %s", url, exc)
         return Image.fromURL(url)
 
-    def _build_onebot_forward_nodes(self, block: MemeBlock) -> list[dict[str, Any]]:
+    def _build_onebot_forward_nodes_from_msgs(
+        self, messages: list[Any], depth: int = 0
+    ) -> list[dict[str, Any]]:
         nodes: list[dict[str, Any]] = []
-        for idx, msg in enumerate(block.messages):
+        for idx, msg in enumerate(messages):
             segments: list[dict[str, Any]] = []
             for part in msg.content:
                 if part.type == "text" and part.text:
                     segments.append({"type": "text", "data": {"text": part.text}})
-                elif part.type == "image" and part.url:
+                elif part.type in ("image", "gif") and part.url:
                     segments.append({"type": "image", "data": {"file": part.url}})
+                elif part.type == "forward_quote" and part.messages and depth < 3:
+                    nested_nodes = self._build_onebot_forward_nodes_from_msgs(
+                        part.messages, depth=depth + 1
+                    )
+                    if nested_nodes:
+                        segments.extend(nested_nodes)
             if not segments:
                 continue
             nodes.append(
@@ -153,12 +161,15 @@ class AstrBotSink:
                     "type": "node",
                     "data": {
                         "name": msg.sender_alias,
-                        "uin": str(10000 + idx),
+                        "uin": str(10000 + depth * 100 + idx),
                         "content": segments,
                     },
                 }
             )
         return nodes
+
+    def _build_onebot_forward_nodes(self, block: MemeBlock) -> list[dict[str, Any]]:
+        return self._build_onebot_forward_nodes_from_msgs(block.messages, depth=0)
 
     async def _try_send_qq_forward(
         self, group_umo: str, block: MemeBlock

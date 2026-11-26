@@ -17,9 +17,9 @@ VALID_NSFW_LEVELS = (NSFW_SAFE, NSFW_MILD, NSFW_HIGH)
 DEFAULT_LIMITS: dict[str, int] = {
     "max_image_bytes": 10_485_760,  # 10MB
     "max_gif_bytes": 5_242_880,  # 5MB
-    "max_images_per_submission": 9,
-    "max_chat_nodes": 20,
-    "max_chat_depth": 1,
+    "max_images_per_submission": 20,
+    "max_chat_nodes": 50,
+    "max_chat_depth": 3,
 }
 
 REPORT_REASONS = (
@@ -73,15 +73,23 @@ class RenderedImage:
 
 @dataclass
 class ChatContentPart:
-    type: str  # "text" | "image"
+    type: str  # "text" | "image" | "gif" | "forward_quote"
     text: str = ""
     url: str = ""
     media_id: str = ""
     w: int = 0
     h: int = 0
+    title: str = ""
+    messages: list["ChatMessageNode"] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ChatContentPart":
+        raw_nested = data.get("messages") or []
+        nested_msgs = [
+            ChatMessageNode.from_dict(m)
+            for m in raw_nested
+            if isinstance(m, dict)
+        ]
         return cls(
             type=str(data.get("type", "text")),
             text=str(data.get("text", "")),
@@ -89,11 +97,19 @@ class ChatContentPart:
             media_id=str(data.get("media_id", "")),
             w=int(data.get("w", 0) or 0),
             h=int(data.get("h", 0) or 0),
+            title=str(data.get("title", "")),
+            messages=nested_msgs,
         )
 
     def to_dict(self) -> dict[str, Any]:
         if self.type == "text":
             return {"type": "text", "text": self.text}
+        if self.type == "forward_quote":
+            return {
+                "type": "forward_quote",
+                "title": self.title or "嵌套聊天记录",
+                "messages": [m.to_dict() for m in self.messages],
+            }
         result: dict[str, Any] = {"type": self.type}
         if self.media_id:
             result["media_id"] = self.media_id

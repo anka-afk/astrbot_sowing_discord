@@ -129,8 +129,8 @@
   "qq_native_forward": {
     "description": "QQ 端优先尝试原生合并转发聊天记录",
     "type": "bool",
-    "hint": "仅对 aiocqhttp 平台的 chat_record 生效；若原生转发失败自动无缝回退为 rendered_images 切片图",
-    "default": false
+    "hint": "仅对 aiocqhttp 平台的 chat_record 生效（支持多层嵌套转发）；若原生转发失败自动无缝回退为 rendered_images 切片图",
+    "default": true
   },
   "media_cache_max_mb": {
     "description": "本地媒体缓存容量上限 (MB)",
