@@ -41,7 +41,13 @@ async def test_rss_source_http_sync_and_304(tmp_path: Path) -> None:
     port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
 
     db = SowingDB(tmp_path / "rss.db")
-    src = RssSource(source_id="rss:test", feed_url=f"http://127.0.0.1:{port}/feed.xml", db=db)
+    origin = f"http://127.0.0.1:{port}"
+    src = RssSource(
+        source_id="rss:test",
+        feed_url=f"{origin}/feed.xml",
+        db=db,
+        trusted_origins=[origin],
+    )
     try:
         r1 = await src.sync()
         assert len(r1.new_items) == 1
@@ -67,14 +73,15 @@ async def test_wechat_sink_downloads_via_media_cache(tmp_path: Path) -> None:
     await site.start()
     port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
 
-    cache = MediaCache(tmp_path / "mcache")
+    origin = f"http://127.0.0.1:{port}"
+    cache = MediaCache(tmp_path / "mcache", trusted_origins=[origin])
     delivered: list[Any] = []
 
     async def fake_send(umo: str, chain: Any) -> dict[str, str]:
         delivered.append((umo, chain))
         return {"message_id": "wx-1"}
 
-    sink = AstrBotSink(media_cache=cache, send_fn=fake_send)
+    sink = AstrBotSink(media_cache=cache, send_fn=fake_send, trusted_origins=[origin])
     try:
         item = MemeItem(
             id="wx-meme",

@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
+import inspect
 import json
 import logging
+import math
+import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 # Graceful compatibility when AstrBot is not installed (unit/integration test environments)
 try:
@@ -132,6 +136,131 @@ def _parse_extra_hub_entry(entry: Any, idx: int) -> Optional[dict[str, Any]]:
     return None
 
 
+def _is_bot_admin(event: Any) -> bool:
+    """Return True strictly if sender is an AstrBot bot administrator."""
+    is_admin_attr = getattr(event, "is_admin", None)
+    if callable(is_admin_attr):
+        try:
+            res = is_admin_attr()
+        except Exception:
+            return False
+        if inspect.iscoroutine(res):
+            res.close()
+            return False
+        return res is True
+    if isinstance(is_admin_attr, bool):
+        return is_admin_attr
+    return str(getattr(event, "role", "") or "").strip().lower() in ("admin", "superadmin")
+
+
+def _is_group_or_bot_admin(event: Any) -> bool:
+    """Return True if sender is an AstrBot bot admin OR verified group owner/admin."""
+    if _is_bot_admin(event):
+        return True
+
+    event_role = str(getattr(event, "role", "") or "").strip().lower()
+    if event_role in ("owner", "admin"):
+        return True
+
+    msg_obj = getattr(event, "message_obj", None)
+    if msg_obj is not None:
+        sender = getattr(msg_obj, "sender", None)
+        if sender is not None:
+            sender_role = (
+                sender.get("role", "")
+                if isinstance(sender, dict)
+                else getattr(sender, "role", "")
+            )
+            if str(sender_role or "").strip().lower() in ("owner", "admin"):
+                return True
+
+        raw = getattr(msg_obj, "raw_message", None)
+        if isinstance(raw, dict):
+            raw_sender = raw.get("sender")
+            if isinstance(raw_sender, dict):
+                raw_role = str(raw_sender.get("role", "") or "").strip().lower()
+                if raw_role in ("owner", "admin"):
+                    return True
+
+    return False
+
+
+class CommandRateLimiter:
+    """Lightweight bounded LRU in-memory per-user & per-group cooldown tracker."""
+
+    def __init__(
+        self,
+        *,
+        user_cooldown_sec: float = 10.0,
+        group_cooldown_sec: float = 5.0,
+        max_entries: int = 2048,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self.user_cooldown_sec = max(0.0, float(user_cooldown_sec))
+        self.group_cooldown_sec = max(0.0, float(group_cooldown_sec))
+        self.max_entries = max(64, int(max_entries))
+        self._clock = clock
+        self._user_last: OrderedDict[tuple[str, str], float] = OrderedDict()
+        self._group_last: OrderedDict[tuple[str, str], float] = OrderedDict()
+
+    def _prune(self, store: OrderedDict[tuple[str, str], float], now: float, ttl: float) -> None:
+        if len(store) <= self.max_entries:
+            return
+        cutoff = now - max(ttl, 60.0)
+        stale = [k for k, ts in store.items() if ts < cutoff]
+        for k in stale:
+            store.pop(k, None)
+        while len(store) > self.max_entries:
+            store.popitem(last=False)
+
+    def check_and_record(
+        self,
+        command: str,
+        *,
+        group_umo: str = "",
+        user_id: str = "",
+        bypass: bool = False,
+    ) -> float:
+        """
+        Check cooldowns and record invocation if allowed.
+
+        Returns remaining wait seconds (> 0.0 if rate-limited, 0.0 if allowed).
+        """
+        if bypass:
+            return 0.0
+        now = self._clock()
+        rem_user = 0.0
+        rem_group = 0.0
+
+        if user_id and self.user_cooldown_sec > 0:
+            ukey = (command, user_id)
+            last_u = self._user_last.get(ukey)
+            if last_u is not None:
+                rem_user = max(0.0, self.user_cooldown_sec - (now - last_u))
+
+        if group_umo and self.group_cooldown_sec > 0:
+            gkey = (command, group_umo)
+            last_g = self._group_last.get(gkey)
+            if last_g is not None:
+                rem_group = max(0.0, self.group_cooldown_sec - (now - last_g))
+
+        remaining = max(rem_user, rem_group)
+        if remaining > 0.0:
+            return remaining
+
+        if user_id and self.user_cooldown_sec > 0:
+            ukey = (command, user_id)
+            self._user_last[ukey] = now
+            self._user_last.move_to_end(ukey)
+            self._prune(self._user_last, now, self.user_cooldown_sec)
+        if group_umo and self.group_cooldown_sec > 0:
+            gkey = (command, group_umo)
+            self._group_last[gkey] = now
+            self._group_last.move_to_end(gkey)
+            self._prune(self._group_last, now, self.group_cooldown_sec)
+        return 0.0
+
+
 def _extract_quoted_msg_id(event: Any) -> str:
     """Best-effort extraction of quoted/replied message ID from an AstrBot event."""
     msg_obj = getattr(event, "message_obj", None)
@@ -191,7 +320,7 @@ def _extract_submission_parts(event: Any) -> dict[str, Any]:
     "astrbot_plugin_sowing_discord",
     "Anka",
     "搬史自动化 2.0：多源可插拔跨平台群聊搬史插件",
-    "2.0.0",
+    "2.0.1",
     "https://github.com/anka/astrbot_plugin_sowing_discord",
 )
 class SowingDiscordPlugin(Star):
@@ -229,10 +358,15 @@ class SowingDiscordPlugin(Star):
                 except Exception as exc:
                     astr_logger.warning("Failed to save migrated AstrBotConfig: %s", exc)
 
-        # 2. Storage & Cache
+        # 2. Storage & Cache (allow admin-configured Hub base URLs as trusted origins for LAN/self-hosted Hubs)
         self.db = SowingDB(self.data_dir / "sowing_v2.db")
+        self.trusted_origins: tuple[str, ...] = self._collect_trusted_hub_origins()
         cache_max_bytes = int(self.config.get("media_cache_max_mb", 200)) * 1024 * 1024
-        self.media_cache = MediaCache(self.data_dir / "media_cache", max_bytes=cache_max_bytes)
+        self.media_cache = MediaCache(
+            self.data_dir / "media_cache",
+            max_bytes=cache_max_bytes,
+            trusted_origins=self.trusted_origins,
+        )
 
         # 3. Default group settings
         self.default_group_settings: dict[str, Any] = {
@@ -262,6 +396,7 @@ class SowingDiscordPlugin(Star):
             context=context,
             media_cache=self.media_cache,
             qq_native_forward=bool(self.config.get("qq_native_forward", False)),
+            trusted_origins=self.trusted_origins,
         )
         self.air_reader = AirReader(
             default_quiet_hours=self.default_group_settings["quiet_hours"],
@@ -285,8 +420,11 @@ class SowingDiscordPlugin(Star):
             air_reader=self.air_reader,
         )
         primary_hub = self._get_submit_hub()
+        allowed_local_dirs = self.config.get("submit_allowed_local_dirs") or []
         self.submit_handler: Optional[SubmitHandler] = (
-            SubmitHandler(primary_hub) if primary_hub is not None else None
+            SubmitHandler(primary_hub, allowed_local_dirs=allowed_local_dirs)
+            if primary_hub is not None
+            else None
         )
         self.report_handler = ReportHandler(self.feedback_collector, self.hub_sources)
         self.admin_handler = AdminHandler(
@@ -296,11 +434,34 @@ class SowingDiscordPlugin(Star):
             default_group_settings=self.default_group_settings,
             migration_report=self.migration_report,
         )
+        self.pull_rate_limiter = CommandRateLimiter(
+            user_cooldown_sec=float(self.config.get("manual_pull_user_cooldown_sec", 10.0)),
+            group_cooldown_sec=float(self.config.get("manual_pull_group_cooldown_sec", 5.0)),
+        )
+        self.submit_rate_limiter = CommandRateLimiter(
+            user_cooldown_sec=float(self.config.get("submit_user_cooldown_sec", 10.0)),
+            group_cooldown_sec=float(self.config.get("submit_group_cooldown_sec", 5.0)),
+        )
 
         # 7. Background asyncio tasks
         self._bg_tasks: list[asyncio.Task[Any]] = []
         if start_background_tasks:
             self._maybe_start_background_tasks()
+
+    def _collect_trusted_hub_origins(self) -> tuple[str, ...]:
+        """Collect exact admin-configured Hub base URLs for LAN/self-hosted media fetches."""
+        origins: list[str] = []
+        if bool(self.config.get("official_hub_enabled", True)):
+            official_url = str(
+                self.config.get("official_hub_url", "https://banshi-api.ankaanka.org")
+            ).strip()
+            if official_url:
+                origins.append(official_url)
+        for idx, raw_hub in enumerate(self.config.get("extra_hubs") or [], start=1):
+            parsed = _parse_extra_hub_entry(raw_hub, idx)
+            if parsed and parsed.get("url"):
+                origins.append(parsed["url"])
+        return tuple(dict.fromkeys(origins))
 
     def _init_sources(self) -> None:
         if bool(self.config.get("official_hub_enabled", True)):
@@ -316,6 +477,7 @@ class SowingDiscordPlugin(Star):
                     enabled=True,
                     user_token=str(self.config.get("user_token", "") or ""),
                     max_nsfw=int(self.config.get("default_max_nsfw", 1)),
+                    media_cache=self.media_cache,
                 )
                 self.sources.append(official)
                 self.hub_sources[official.hub_id] = official
@@ -334,6 +496,7 @@ class SowingDiscordPlugin(Star):
                 tags=parsed["tags"],
                 exclude_tags=parsed["exclude_tags"],
                 max_nsfw=parsed["max_nsfw"],
+                media_cache=self.media_cache,
             )
             self.sources.append(hub)
             self.hub_sources[hub.hub_id] = hub
@@ -448,6 +611,14 @@ class SowingDiscordPlugin(Star):
     @filter.command("来坨史", alias={"搬史"})
     async def cmd_manual_pull(self, event: AstrMessageEvent, tag: str = ""):
         group_umo = str(getattr(event, "unified_msg_origin", ""))
+        user_id = str(event.get_sender_id()) if hasattr(event, "get_sender_id") else ""
+        is_admin = _is_bot_admin(event)
+        wait_sec = self.pull_rate_limiter.check_and_record(
+            "manual_pull", group_umo=group_umo, user_id=user_id, bypass=is_admin
+        )
+        if wait_sec > 0.0:
+            yield event.plain_result(f"手速太快啦，请 {math.ceil(wait_sec)} 秒后再来坨史~")
+            return
         res = await self.manual_pull_handler.pull_and_deliver(
             group_umo, tag=tag, trigger_type="manual"
         )
@@ -458,6 +629,15 @@ class SowingDiscordPlugin(Star):
     async def cmd_submit(self, event: AstrMessageEvent, tags_or_note: str = ""):
         if self.submit_handler is None:
             yield event.plain_result("当前未启用任何 Hub，无法使用 /投稿。")
+            return
+        group_umo = str(getattr(event, "unified_msg_origin", ""))
+        user_id = str(event.get_sender_id()) if hasattr(event, "get_sender_id") else ""
+        is_admin = _is_bot_admin(event)
+        wait_sec = self.submit_rate_limiter.check_and_record(
+            "submit", group_umo=group_umo, user_id=user_id, bypass=is_admin
+        )
+        if wait_sec > 0.0:
+            yield event.plain_result(f"投稿太频繁啦，请 {math.ceil(wait_sec)} 秒后再试~")
             return
         parts = _extract_submission_parts(event)
         tags = [t.lstrip("#") for t in tags_or_note.split() if t.startswith("#")]
@@ -470,6 +650,7 @@ class SowingDiscordPlugin(Star):
             images=parts["images"],
             chat_nodes=parts["chat_nodes"],
             videos=parts["videos"],
+            is_bot_admin=is_admin,
         )
         yield event.plain_result(res.message)
 
@@ -489,7 +670,8 @@ class SowingDiscordPlugin(Star):
     @filter.command("史库")
     async def cmd_admin(self, event: AstrMessageEvent, args: str = ""):
         group_umo = str(getattr(event, "unified_msg_origin", ""))
-        reply = self.admin_handler.handle(group_umo, args)
+        authorized = _is_group_or_bot_admin(event)
+        reply = self.admin_handler.handle(group_umo, args, is_authorized=authorized)
         yield event.plain_result(reply)
 
     # ------------------------------------------------------------------

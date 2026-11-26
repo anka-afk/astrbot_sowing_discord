@@ -26,6 +26,8 @@ _NSFW_LABELS = {
     2: "2（高能预警）",
 }
 
+UNAUTHORIZED_MESSAGE = "仅群主、群管理员或 Bot 管理员可执行此操作。"
+
 
 class AdminHandler:
     """Per-group management and diagnostics for `/史库`."""
@@ -45,10 +47,41 @@ class AdminHandler:
         self.default_group_settings = dict(default_group_settings or {})
         self.migration_report = migration_report
 
-    def handle(self, group_umo: str, args_text: str = "") -> str:
+    @staticmethod
+    def _requires_authorization(sub: str, rest: list[str]) -> bool:
+        """Return True for mutating subcommands and sensitive diagnostics (`订阅`)."""
+        sub_l = sub.lower()
+        if sub_l in ("状态", "status", "帮助", "help", "-h", "--help"):
+            return False
+        if sub_l in ("开关", "toggle", "switch"):
+            return True
+        if sub_l in ("订阅", "sources", "sub"):
+            return True
+        if sub_l in ("分级", "nsfw"):
+            return True
+        if sub_l in ("屏蔽", "block", "tags"):
+            if not rest or rest[0].lower() in ("列表", "list"):
+                return False
+            return True
+        if sub_l in ("读空气", "air", "ambient"):
+            if not rest or rest[0].lower() in ("状态", "status"):
+                return False
+            return True
+        return False
+
+    def handle(
+        self,
+        group_umo: str,
+        args_text: str = "",
+        *,
+        is_authorized: bool = True,
+    ) -> str:
         tokens = [t for t in (args_text or "").strip().split() if t]
-        sub = tokens[0] if tokens else "状态"
+        sub = (tokens[0] if tokens else "状态").lower()
         rest = tokens[1:]
+
+        if not is_authorized and self._requires_authorization(sub, rest):
+            return UNAUTHORIZED_MESSAGE
 
         if sub in ("状态", "status"):
             return self._cmd_status(group_umo)
@@ -128,7 +161,7 @@ class AdminHandler:
     def _cmd_block_tags(self, group_umo: str, rest: list[str]) -> str:
         cfg = self.db.get_group_settings(group_umo, defaults=self.default_group_settings)
         blocked: list[str] = list(cfg.get("blocked_tags") or [])
-        if not rest or rest[0] in ("列表", "list"):
+        if not rest or rest[0].lower() in ("列表", "list"):
             return f"本群当前屏蔽标签：{', '.join(blocked) if blocked else '无'}"
 
         op = rest[0].lower()
@@ -180,7 +213,7 @@ class AdminHandler:
 
     def _cmd_air(self, group_umo: str, rest: list[str]) -> str:
         cfg = self.db.get_group_settings(group_umo, defaults=self.default_group_settings)
-        if not rest or rest[0] in ("状态", "status"):
+        if not rest or rest[0].lower() in ("状态", "status"):
             air = self.air_reader.evaluate(
                 group_umo,
                 quiet_hours=cfg["quiet_hours"],

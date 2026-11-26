@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, Sequence
 
 try:
     from astrbot.api.event import MessageChain  # type: ignore
@@ -47,8 +47,10 @@ except ImportError:
 
 try:
     from ..models.meme import MemeBlock, MemeItem
+    from ..utils.net_safety import is_public_http_url_literal
 except ImportError:
     from models.meme import MemeBlock, MemeItem
+    from utils.net_safety import is_public_http_url_literal
 
 from .media_cache import MediaCache
 
@@ -109,12 +111,21 @@ class AstrBotSink:
         qq_native_forward: bool = False,
         send_fn: Optional[SendCallable] = None,
         qq_forward_fn: Optional[ForwardCallable] = None,
+        trusted_origins: Sequence[str] = (),
     ):
         self.context = context
         self.media_cache = media_cache
         self.qq_native_forward = qq_native_forward
         self._send_fn = send_fn
         self._qq_forward_fn = qq_forward_fn
+        if trusted_origins:
+            self.trusted_origins: tuple[str, ...] = tuple(
+                str(o).strip() for o in trusted_origins if str(o).strip()
+            )
+        elif media_cache is not None:
+            self.trusted_origins = tuple(getattr(media_cache, "trusted_origins", ()))
+        else:
+            self.trusted_origins = ()
 
     def _needs_local_file(self, platform: str) -> bool:
         return any(p in platform for p in _LOCAL_DOWNLOAD_PLATFORMS)
@@ -124,18 +135,25 @@ class AstrBotSink:
 
     async def _build_image_component(
         self, url: str, platform: str, mime_hint: str = ""
-    ) -> Any:
+    ) -> Optional[Any]:
+        clean_url = (url or "").strip()
+        if not is_public_http_url_literal(clean_url, trusted_origins=self.trusted_origins):
+            logger.warning("Blocked unsafe image URL in AstrBotSink: %r", url)
+            return None
         if self.media_cache is not None and self._needs_local_file(platform):
             try:
                 local_path = await self.media_cache.get_or_download(
-                    url,
+                    clean_url,
                     mime_hint=mime_hint,
                     convert_webp_to_jpeg=self._needs_webp_degrade(platform),
                 )
                 return Image.fromFileSystem(str(local_path))
+            except ValueError as exc:
+                logger.warning("Rejected unsafe/oversized media URL %s: %s", clean_url, exc)
+                return None
             except Exception as exc:
-                logger.warning("Local media cache download failed for %s: %s", url, exc)
-        return Image.fromURL(url)
+                logger.warning("Local media cache download failed for %s: %s", clean_url, exc)
+        return Image.fromURL(clean_url)
 
     def _build_onebot_forward_nodes_from_msgs(
         self, messages: list[Any], depth: int = 0
@@ -147,7 +165,13 @@ class AstrBotSink:
                 if part.type == "text" and part.text:
                     segments.append({"type": "text", "data": {"text": part.text}})
                 elif part.type in ("image", "gif") and part.url:
-                    segments.append({"type": "image", "data": {"file": part.url}})
+                    clean_url = str(part.url).strip()
+                    if not is_public_http_url_literal(
+                        clean_url, trusted_origins=self.trusted_origins
+                    ):
+                        logger.warning("Blocked unsafe forward image URL: %r", part.url)
+                        continue
+                    segments.append({"type": "image", "data": {"file": clean_url}})
                 elif part.type == "forward_quote" and part.messages and depth < 3:
                     nested_nodes = self._build_onebot_forward_nodes_from_msgs(
                         part.messages, depth=depth + 1
@@ -221,20 +245,20 @@ class AstrBotSink:
             if block.type == "text" and block.text:
                 components.append(Plain(block.text))
             elif block.type in ("image", "gif") and block.url:
-                components.append(
-                    await self._build_image_component(block.url, platform, block.mime)
-                )
+                comp = await self._build_image_component(block.url, platform, block.mime)
+                if comp is not None:
+                    components.append(comp)
             elif block.type == "chat_record":
                 if skip_chat_blocks:
                     continue
                 if block.rendered_images:
                     for slice_img in block.rendered_images:
                         if slice_img.url:
-                            components.append(
-                                await self._build_image_component(
-                                    slice_img.url, platform, slice_img.mime
-                                )
+                            comp = await self._build_image_component(
+                                slice_img.url, platform, slice_img.mime
                             )
+                            if comp is not None:
+                                components.append(comp)
                 elif block.messages:
                     # Fallback plain-text dialogue when rendered_images absent (e.g., local source)
                     lines: list[str] = []
@@ -248,17 +272,17 @@ class AstrBotSink:
                         components.append(Plain("\n".join(lines)))
             elif block.type == "video_link":
                 if block.cover_url:
-                    components.append(
-                        await self._build_image_component(block.cover_url, platform, "image/webp")
-                    )
+                    comp = await self._build_image_component(block.cover_url, platform, "image/webp")
+                    if comp is not None:
+                        components.append(comp)
                 label = f"[{block.platform}] " if block.platform else ""
                 title = block.title or "外链视频"
                 components.append(Plain(f"{label}{title}\n{block.url}"))
             elif block.type == "video_file":
                 if block.cover_url:
-                    components.append(
-                        await self._build_image_component(block.cover_url, platform, "image/webp")
-                    )
+                    comp = await self._build_image_component(block.cover_url, platform, "image/webp")
+                    if comp is not None:
+                        components.append(comp)
                 link = block.play_page_url or block.url
                 if link:
                     components.append(Plain(f"[视频] {link}"))

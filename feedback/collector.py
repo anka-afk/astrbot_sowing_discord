@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import re
+import secrets
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 
@@ -61,15 +63,21 @@ REPORT_REASON_ALIASES: dict[str, str] = {
 
 
 def compute_voter_hash(instance_salt: str, group_id: str, user_id: str) -> str:
-    """Blinded voter hash: sha256(instance_salt + group_id + user_id)."""
-    raw = f"{instance_salt}{group_id}{user_id}".encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+    """Blinded voter hash: HMAC-SHA256(key=instance_salt, msg=f'{group_id}:{user_id}')."""
+    return hmac.new(
+        instance_salt.encode("utf-8"),
+        f"{group_id}:{user_id}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def compute_group_hash(instance_salt: str, group_id: str) -> str:
-    """Blinded group hash: sha256(instance_salt + group_id)."""
-    raw = f"{instance_salt}{group_id}".encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+    """Blinded group hash: HMAC-SHA256(key=instance_salt, msg=f'group:{group_id}')."""
+    return hmac.new(
+        instance_salt.encode("utf-8"),
+        f"group:{group_id}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def normalize_report_reason(raw_reason: str = "") -> str:
@@ -92,12 +100,30 @@ def parse_hub_item_uid(item_uid: str) -> Optional[tuple[str, str]]:
     return None
 
 
+_LOCAL_SALT_CURSOR_ID = "_local_feedback_salt"
+
+
 class FeedbackCollector:
     """Collects emoji_like, quoted keyword replies, and /烂史 reports and flushes in batches."""
 
-    def __init__(self, db: SowingDB, default_salt: str = "default-local-salt"):
+    def __init__(self, db: SowingDB, default_salt: Optional[str] = None):
         self.db = db
-        self.default_salt = default_salt
+        self._explicit_salt = default_salt.strip() if default_salt else ""
+        self._cached_local_salt: str = ""
+
+    def _get_or_create_persistent_salt(self) -> str:
+        if self._explicit_salt:
+            return self._explicit_salt
+        if self._cached_local_salt:
+            return self._cached_local_salt
+        cursor = self.db.get_source_cursor(_LOCAL_SALT_CURSOR_ID)
+        if cursor and cursor.get("instance_salt"):
+            self._cached_local_salt = str(cursor["instance_salt"])
+            return self._cached_local_salt
+        new_salt = secrets.token_hex(32)
+        self.db.upsert_source_cursor(_LOCAL_SALT_CURSOR_ID, instance_salt=new_salt)
+        self._cached_local_salt = new_salt
+        return new_salt
 
     def _get_salt_for_hub(self, hub_id: str, hub_sources: Optional[Mapping[str, HubSource]] = None) -> str:
         if hub_sources and hub_id in hub_sources:
@@ -106,7 +132,7 @@ class FeedbackCollector:
         for cursor in self.db.list_source_cursors():
             if cursor.get("hub_id") == hub_id and cursor.get("instance_salt"):
                 return str(cursor["instance_salt"])
-        return self.default_salt
+        return self._get_or_create_persistent_salt()
 
     def _record_event(
         self,
@@ -218,9 +244,11 @@ class FeedbackCollector:
         hub_sources: Mapping[str, HubSource],
         *,
         batch_size: int = 50,
+        max_batches: int = 10,
     ) -> dict[str, int]:
-        """Flush queued feedback events to their respective Hubs (<=50 per batch)."""
+        """Flush queued feedback events to their respective Hubs (<=50 per batch, capped per cycle)."""
         batch_limit = max(1, min(int(batch_size), 50))
+        batch_cap = max(1, int(max_batches))
         flushed_counts: dict[str, int] = {}
 
         for hub_id, hub in hub_sources.items():
@@ -230,7 +258,7 @@ class FeedbackCollector:
                 continue
 
             total_sent = 0
-            while True:
+            for _ in range(batch_cap):
                 rows = self.db.peek_feedback_batch(hub_id=hub_id, limit=batch_limit)
                 if not rows:
                     break

@@ -6,6 +6,6 @@ help: |
   - /投稿 [标签/附言]：引用消息或附带图文投稿至 Hub（自动本地脱敏与去重早停）
   - /烂史 [原因]：引用 Bot 搬运的消息进行踩/举报
   - /史库 <状态|开关|订阅|屏蔽|分级|读空气>：查看状态与按群配置
-version: 2.0.0
+version: 2.0.1
 author: Anka
 repo: https://github.com/anka-afk/astrbot_sowing_discord

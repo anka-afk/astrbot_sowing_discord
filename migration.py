@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, MutableMapping, Optional
@@ -85,6 +86,10 @@ def _extract_cooldown_sec(config: Mapping[str, Any]) -> Optional[int]:
     return None
 
 
+def _is_posix() -> bool:
+    return os.name == "posix"
+
+
 def migrate_v1_to_v2(
     config: MutableMapping[str, Any],
     data_dir: str | Path,
@@ -104,10 +109,17 @@ def migrate_v1_to_v2(
 
     # Full backup of raw v1 config before mutating anything
     raw_snapshot = dict(config)
-    backup_file.write_text(
-        json.dumps(raw_snapshot, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
-    )
+    backup_payload = json.dumps(raw_snapshot, ensure_ascii=False, indent=2, default=str)
+    if _is_posix():
+        fd = os.open(str(backup_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(backup_payload)
+        try:
+            os.chmod(backup_file, 0o600)
+        except OSError:
+            pass
+    else:
+        backup_file.write_text(backup_payload, encoding="utf-8")
 
     migrated_cfg = dict(config)
 

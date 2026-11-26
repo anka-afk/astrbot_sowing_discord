@@ -63,6 +63,13 @@ class ReportHandler:
                 reason=canonical,
                 message="未找到该引用消息对应的 Hub 史库记录（可能是本地源/RSS 条目或非本插件发送）。",
             )
+        if outbox_id == 0:
+            return ReportResult(
+                ok=True,
+                reason=canonical,
+                outbox_id=0,
+                message="已记录过您的匿名举报，无需重复提交，感谢维护史库质量！",
+            )
         return ReportResult(
             ok=True,
             reason=canonical,

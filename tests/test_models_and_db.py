@@ -47,7 +47,7 @@ def _make_item(
 def test_metadata_and_conf_schema_valid() -> None:
     root = Path(__file__).resolve().parent.parent
     meta = yaml.safe_load((root / "metadata.yaml").read_text(encoding="utf-8"))
-    assert meta["version"] == "2.0.0"
+    assert meta["version"] == "2.0.1"
     assert meta["name"] == "astrbot_sowing_discord"
 
     schema = json.loads((root / "_conf_schema.json").read_text(encoding="utf-8"))

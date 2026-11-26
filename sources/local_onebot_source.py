@@ -12,9 +12,11 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 try:
     from ..models.meme import MemeAttribution, MemeBlock, MemeItem
     from ..storage.db import SowingDB
+    from ..utils.net_safety import is_public_http_url_literal
 except ImportError:
     from models.meme import MemeAttribution, MemeBlock, MemeItem
     from storage.db import SowingDB
+    from utils.net_safety import is_public_http_url_literal
 
 from .base import BaseSource, SyncResult
 
@@ -168,7 +170,9 @@ class LocalOneBotSource(BaseSource):
                     text_parts.append(txt)
             elif stype == "image":
                 url = str(sdata.get("url") or sdata.get("file") or "").strip()
-                if not url:
+                if not is_public_http_url_literal(url):
+                    if url:
+                        logger.warning("Skipping unsafe/non-public image source in LocalOneBotSource")
                     continue
                 is_gif = url.lower().split("?", 1)[0].endswith(".gif") or str(
                     sdata.get("sub_type", "")

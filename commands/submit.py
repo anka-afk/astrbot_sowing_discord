@@ -6,7 +6,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, Sequence
 from urllib.parse import urlparse
 
 import aiohttp
@@ -14,11 +14,17 @@ import aiohttp
 try:
     from ..models.meme import DEFAULT_LIMITS
     from ..sources.hub_source import HubSource
+    from ..utils.net_safety import create_safe_http_session, is_safe_http_url, safe_fetch_bytes
 except ImportError:
     from models.meme import DEFAULT_LIMITS
     from sources.hub_source import HubSource
+    from utils.net_safety import create_safe_http_session, is_safe_http_url, safe_fetch_bytes
 
 logger = logging.getLogger(__name__)
+
+
+class MediaValidationError(ValueError):
+    """User-safe media validation error message (never contains host paths or internal errors)."""
 
 MediaFetcher = Callable[[str], Awaitable[tuple[bytes, str, str]]]
 
@@ -242,10 +248,14 @@ class SubmitHandler:
         *,
         media_fetcher: Optional[MediaFetcher] = None,
         session: Optional[aiohttp.ClientSession] = None,
+        allowed_local_dirs: Optional[Sequence[str | Path]] = None,
     ):
         self.hub_source = hub_source
         self._media_fetcher = media_fetcher
         self._session = session
+        self.allowed_local_dirs: tuple[Path, ...] = tuple(
+            Path(d).resolve() for d in (allowed_local_dirs or ())
+        )
 
     def _limits(self) -> dict[str, int]:
         meta = self.hub_source.cached_meta
@@ -263,7 +273,16 @@ class SubmitHandler:
         meta = self.hub_source.cached_meta
         return bool(meta is not None and meta.capabilities.video_file)
 
-    async def _fetch_media_bytes(self, item: dict[str, Any]) -> tuple[bytes, str, str]:
+    async def _fetch_media_bytes(
+        self, item: dict[str, Any], *, max_bytes: Optional[int] = None
+    ) -> tuple[bytes, str, str]:
+        limits = self._limits()
+        byte_cap = (
+            max_bytes
+            if max_bytes is not None
+            else max(limits["max_image_bytes"], limits["max_gif_bytes"])
+        )
+
         if isinstance(item.get("data_bytes"), (bytes, bytearray)):
             data = bytes(item["data_bytes"])
             filename = str(item.get("filename") or "image.png")
@@ -277,32 +296,53 @@ class SubmitHandler:
         if self._media_fetcher is not None:
             return await self._media_fetcher(url)
 
-        if not url.startswith(("http://", "https://")):
-            path = Path(url)
-            data = path.read_bytes()
-            ext = path.suffix.lower()
-            mime = "image/gif" if ext == ".gif" else ("image/webp" if ext == ".webp" else "image/jpeg")
-            return data, path.name, mime
-
-        own_session = self._session is None or self._session.closed
-        session = self._session if not own_session else aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
-        try:
-            async with session.get(url) as resp:
-                resp.raise_for_status()
-                mime = (resp.headers.get("Content-Type") or "application/octet-stream").split(";", 1)[0].strip()
-                data = await resp.read()
-                filename = Path(urlparse(url).path).name or "upload.bin"
+        if is_safe_http_url(url):
+            own_session = self._session is None or self._session.closed
+            session = (
+                self._session
+                if not own_session
+                else create_safe_http_session(timeout=20.0)
+            )
+            try:
+                data, mime, final_url = await safe_fetch_bytes(
+                    session,
+                    url,
+                    max_bytes=byte_cap,
+                    timeout=20.0,
+                )
+                filename = Path(urlparse(final_url).path).name or "upload.bin"
                 return data, filename, mime
-        finally:
-            if own_session:
-                await session.close()
+            finally:
+                if own_session:
+                    await session.close()
+
+        # Non-HTTP(S) input: disallow URI schemes and require explicitly configured safe local dir
+        lowered = url.lower()
+        if lowered.startswith(("file:", "javascript:", "data:", "ftp:", "gopher:")):
+            raise ValueError("Unsupported URI scheme for media submission")
+
+        if not self.allowed_local_dirs:
+            raise ValueError("Local file reads are disabled for media submissions")
+
+        resolved = Path(url).resolve()
+        if not any(resolved.is_relative_to(allowed_dir) for allowed_dir in self.allowed_local_dirs):
+            raise ValueError("Local media path is outside allowed directories")
+        if not resolved.is_file():
+            raise ValueError("Local media path is not a regular file")
+        st = resolved.stat()
+        if st.st_size > byte_cap:
+            raise MediaValidationError(f"媒体文件过大（上限 {byte_cap // (1024 * 1024)}MB）")
+        data = resolved.read_bytes()
+        ext = resolved.suffix.lower()
+        mime = "image/gif" if ext == ".gif" else ("image/webp" if ext == ".webp" else "image/jpeg")
+        return data, resolved.name, mime
 
     def _validate_media_size(self, data: bytes, mime: str, filename: str, limits: dict[str, int]) -> None:
         is_gif = "gif" in mime.lower() or filename.lower().endswith(".gif") or data[:6] in (b"GIF87a", b"GIF89a")
         if is_gif and len(data) > limits["max_gif_bytes"]:
-            raise ValueError(f"GIF 文件过大（上限 {limits['max_gif_bytes'] // (1024 * 1024)}MB）")
+            raise MediaValidationError(f"GIF 文件过大（上限 {limits['max_gif_bytes'] // (1024 * 1024)}MB）")
         if not is_gif and len(data) > limits["max_image_bytes"]:
-            raise ValueError(f"图片文件过大（上限 {limits['max_image_bytes'] // (1024 * 1024)}MB）")
+            raise MediaValidationError(f"图片文件过大（上限 {limits['max_image_bytes'] // (1024 * 1024)}MB）")
 
     @staticmethod
     def _duplicate_result(upload_resp: dict[str, Any]) -> SubmitResult:
@@ -332,6 +372,7 @@ class SubmitHandler:
         chat_nodes: Optional[list[dict[str, Any]]] = None,
         videos: Optional[list[Any]] = None,
         segments: Optional[list[dict[str, Any]]] = None,
+        is_bot_admin: bool = False,
     ) -> SubmitResult:
         """Execute full local validation, scrubbing, media upload (with early-stop), and submission."""
         raw_payload = {
@@ -349,6 +390,7 @@ class SubmitHandler:
             )
 
         limits = self._limits()
+        max_fetch_bytes = max(limits["max_image_bytes"], limits["max_gif_bytes"])
         blocks: list[dict[str, Any]] = []
         uploaded_count = 0
         max_images = limits["max_images_per_submission"]
@@ -374,10 +416,16 @@ class SubmitHandler:
             if uploaded_count >= max_images:
                 break
             try:
-                data, filename, mime = await self._fetch_media_bytes(img)
+                data, filename, mime = await self._fetch_media_bytes(img, max_bytes=max_fetch_bytes)
                 self._validate_media_size(data, mime, filename, limits)
-            except Exception as exc:
+            except MediaValidationError as exc:
                 return SubmitResult(ok=False, message=f"媒体预处理失败：{exc}")
+            except Exception as exc:
+                logger.warning("Media preprocessing failed during /投稿: %s", exc, exc_info=True)
+                return SubmitResult(
+                    ok=False,
+                    message="媒体预处理失败：媒体地址无效、超出大小限制或无法访问。",
+                )
 
             is_gif = (
                 "gif" in mime.lower()
@@ -385,7 +433,10 @@ class SubmitHandler:
                 or data[:6] in (b"GIF87a", b"GIF89a")
             )
             upload_resp = await self.hub_source.upload_media(
-                data, filename=filename, content_type=mime
+                data,
+                filename=filename,
+                content_type=mime,
+                include_user_token=is_bot_admin,
             )
             if upload_resp.get("duplicate"):
                 return self._duplicate_result(upload_resp)
@@ -419,13 +470,28 @@ class SubmitHandler:
                         if uploaded_count >= max_images:
                             continue
                         try:
-                            data, filename, mime = await self._fetch_media_bytes(part)
+                            data, filename, mime = await self._fetch_media_bytes(
+                                part, max_bytes=max_fetch_bytes
+                            )
                             self._validate_media_size(data, mime, filename, limits)
-                        except Exception as exc:
+                        except MediaValidationError as exc:
                             return SubmitResult(ok=False, message=f"聊天记录图片预处理失败：{exc}")
+                        except Exception as exc:
+                            logger.warning(
+                                "Chat record media preprocessing failed during /投稿: %s",
+                                exc,
+                                exc_info=True,
+                            )
+                            return SubmitResult(
+                                ok=False,
+                                message="聊天记录图片预处理失败：媒体地址无效、超出大小限制或无法访问。",
+                            )
 
                         upload_resp = await self.hub_source.upload_media(
-                            data, filename=filename, content_type=mime
+                            data,
+                            filename=filename,
+                            content_type=mime,
+                            include_user_token=is_bot_admin,
                         )
                         if upload_resp.get("duplicate"):
                             return self._duplicate_result(upload_resp)
@@ -458,6 +524,7 @@ class SubmitHandler:
             blocks=blocks,
             title=title.strip(),
             tags=[t.strip() for t in (tags or []) if t.strip()],
+            include_user_token=is_bot_admin,
         )
         sub_id = str(resp.get("submission_id", ""))
         status = str(resp.get("status", "pending"))

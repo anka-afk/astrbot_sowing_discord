@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -75,10 +76,17 @@ CREATE TABLE IF NOT EXISTS feedback_outbox (
     reason TEXT DEFAULT NULL,
     voter_hash TEXT NOT NULL,
     group_hash TEXT NOT NULL,
-    occurred_at TEXT NOT NULL
+    occurred_at TEXT NOT NULL,
+    UNIQUE(hub_id, item_id, voter_hash, action)
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_outbox_hub ON feedback_outbox(hub_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_outbox_dedup
+    ON feedback_outbox(hub_id, item_id, voter_hash, action);
 """
+
+
+def _is_posix() -> bool:
+    return os.name == "posix"
 
 
 class SowingDB:
@@ -94,8 +102,30 @@ class SowingDB:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL;")
             self._conn.execute("PRAGMA foreign_keys=ON;")
+            # Deduplicate legacy feedback_outbox rows if upgrading an existing DB before creating unique index
+            has_outbox = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='feedback_outbox'"
+            ).fetchone()
+            if has_outbox is not None:
+                self._conn.execute(
+                    """
+                    DELETE FROM feedback_outbox
+                    WHERE id NOT IN (
+                        SELECT MIN(id) FROM feedback_outbox
+                        GROUP BY hub_id, item_id, voter_hash, action
+                    )
+                    """
+                )
             self._conn.executescript(SCHEMA_SQL)
             self._conn.commit()
+        if str(db_path) != ":memory:" and _is_posix():
+            for suffix in ("", "-wal", "-shm"):
+                p = Path(f"{self.db_path}{suffix}")
+                if p.exists():
+                    try:
+                        os.chmod(p, 0o600)
+                    except OSError:
+                        pass
 
     def close(self) -> None:
         with self._lock:
@@ -180,6 +210,28 @@ class SowingDB:
             cur = self._conn.execute("DELETE FROM items_cache WHERE uid = ?", (uid,))
             self._conn.commit()
             return cur.rowcount > 0
+
+    def get_items_by_hub_item_ids(self, hub_id: str, item_ids: list[str]) -> list[MemeItem]:
+        """Return cached MemeItems matching a Hub's item IDs (used before tombstone eviction)."""
+        if not item_ids:
+            return []
+        uids = [
+            iid if iid.startswith("hub:") else f"hub:{hub_id}:{iid}"
+            for iid in item_ids
+        ]
+        placeholders = ",".join("?" for _ in uids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT payload_json FROM items_cache WHERE uid IN ({placeholders})",
+                uids,
+            ).fetchall()
+        items: list[MemeItem] = []
+        for row in rows:
+            try:
+                items.append(MemeItem.from_json(row["payload_json"]))
+            except Exception:
+                continue
+        return items
 
     def delete_items_by_hub_item_ids(self, hub_id: str, item_ids: list[str]) -> int:
         """Remove tombstoned items belonging to a specific Hub from local cache."""
@@ -524,14 +576,14 @@ class SowingDB:
         with self._lock:
             cur = self._conn.execute(
                 """
-                INSERT INTO feedback_outbox
+                INSERT OR IGNORE INTO feedback_outbox
                     (hub_id, item_id, action, reason, voter_hash, group_hash, occurred_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (hub_id, item_id, action, reason, voter_hash, group_hash, occurred_at),
             )
             self._conn.commit()
-            return int(cur.lastrowid)
+            return int(cur.lastrowid) if cur.rowcount > 0 else 0
 
     def peek_feedback_batch(
         self, hub_id: Optional[str] = None, limit: int = 50

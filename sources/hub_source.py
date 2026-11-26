@@ -12,15 +12,68 @@ from typing import Any, Optional
 import aiohttp
 
 try:
-    from ..models.meme import HubMeta, MemeItem
+    from ..models.meme import ChatMessageNode, HubMeta, MemeItem
+    from ..sinks.media_cache import MediaCache
     from ..storage.db import SowingDB
 except ImportError:
-    from models.meme import HubMeta, MemeItem
+    from models.meme import ChatMessageNode, HubMeta, MemeItem
+    from sinks.media_cache import MediaCache
     from storage.db import SowingDB
 
 from .base import BaseSource, SyncResult
 
 logger = logging.getLogger(__name__)
+
+MIN_POW_DIFFICULTY_BITS = 1
+MAX_POW_DIFFICULTY_BITS = 22
+MAX_POW_ATTEMPTS = 5_000_000
+
+
+def _raise_for_status_no_redirect(resp: aiohttp.ClientResponse) -> None:
+    """Reject 3xx redirect responses (which aiohttp's raise_for_status ignores) as well as 4xx/5xx."""
+    if 300 <= resp.status < 400:
+        raise aiohttp.ClientResponseError(
+            resp.request_info,
+            resp.history,
+            status=resp.status,
+            message=f"Unexpected redirect status {resp.status}",
+            headers=resp.headers,
+        )
+    resp.raise_for_status()
+
+
+def extract_media_urls_from_item(item: MemeItem) -> list[str]:
+    """Recursively collect all media URLs referenced by a cached MemeItem."""
+    urls: list[str] = []
+
+    def _add(url: str) -> None:
+        cleaned = (url or "").strip()
+        if cleaned and cleaned not in urls:
+            urls.append(cleaned)
+
+    def _walk_messages(messages: list[ChatMessageNode], depth: int = 0) -> None:
+        if depth > 8:
+            return
+        for node in messages:
+            for part in node.content:
+                if part.type in ("image", "gif") and part.url:
+                    _add(part.url)
+                elif part.type == "forward_quote" and part.messages:
+                    _walk_messages(part.messages, depth=depth + 1)
+
+    for block in item.blocks:
+        if block.type in ("image", "gif", "video_file") and block.url:
+            _add(block.url)
+        if block.cover_url:
+            _add(block.cover_url)
+        if block.type == "chat_record":
+            for rendered in block.rendered_images:
+                if rendered.url:
+                    _add(rendered.url)
+            if block.messages:
+                _walk_messages(block.messages, depth=0)
+
+    return urls
 
 
 def _has_leading_zero_bits(digest: bytes, difficulty_bits: int) -> bool:
@@ -44,15 +97,22 @@ def verify_pow(nonce_prefix: str, solution: str, difficulty_bits: int = 16) -> b
     return _has_leading_zero_bits(digest, difficulty_bits)
 
 
-def solve_pow(nonce_prefix: str, difficulty_bits: int = 16, max_attempts: int = 5_000_000) -> str:
+def solve_pow(nonce_prefix: str, difficulty_bits: int = 16, max_attempts: int = MAX_POW_ATTEMPTS) -> str:
     """Solve lightweight SHA-256 PoW: sha256(f"{nonce_prefix}:{solution}") leading zero bits."""
+    bits = int(difficulty_bits)
+    if bits < MIN_POW_DIFFICULTY_BITS or bits > MAX_POW_DIFFICULTY_BITS:
+        raise ValueError(
+            f"Unsupported PoW difficulty_bits={bits}; allowed range is "
+            f"[{MIN_POW_DIFFICULTY_BITS}, {MAX_POW_DIFFICULTY_BITS}]"
+        )
+    attempts = max(1, min(int(max_attempts), MAX_POW_ATTEMPTS))
     prefix_bytes = f"{nonce_prefix}:".encode("utf-8")
-    for counter in range(max_attempts):
+    for counter in range(attempts):
         sol = f"{counter:x}"
         digest = hashlib.sha256(prefix_bytes + sol.encode("ascii")).digest()
-        if _has_leading_zero_bits(digest, difficulty_bits):
+        if _has_leading_zero_bits(digest, bits):
             return sol
-    raise RuntimeError(f"Failed to solve {difficulty_bits}-bit PoW within {max_attempts} attempts")
+    raise RuntimeError(f"Failed to solve {bits}-bit PoW within {attempts} attempts")
 
 
 class HubSource(BaseSource):
@@ -77,6 +137,7 @@ class HubSource(BaseSource):
         session: Optional[aiohttp.ClientSession] = None,
         base_backoff_sec: int = 30,
         max_backoff_sec: int = 3600,
+        media_cache: Optional[MediaCache] = None,
     ):
         super().__init__(source_id=source_id, enabled=enabled)
         self.base_url = base_url.rstrip("/")
@@ -92,6 +153,7 @@ class HubSource(BaseSource):
         self._session = session
         self.base_backoff_sec = base_backoff_sec
         self.max_backoff_sec = max_backoff_sec
+        self.media_cache = media_cache
 
         self._meta: Optional[HubMeta] = None
         self._meta_fetched_at: float = 0.0
@@ -164,8 +226,8 @@ class HubSource(BaseSource):
             return self._meta
 
         session = await self._get_session()
-        async with session.get(self._api_url("/meta")) as resp:
-            resp.raise_for_status()
+        async with session.get(self._api_url("/meta"), allow_redirects=False) as resp:
+            _raise_for_status_no_redirect(resp)
             data = await resp.json()
 
         meta = HubMeta.from_dict(data)
@@ -195,23 +257,39 @@ class HubSource(BaseSource):
                 }
 
             session = await self._get_session()
-            async with session.get(self._api_url("/instances/challenge")) as resp:
-                resp.raise_for_status()
+            async with session.get(
+                self._api_url("/instances/challenge"), allow_redirects=False
+            ) as resp:
+                _raise_for_status_no_redirect(resp)
                 challenge = await resp.json()
 
             challenge_id = str(challenge["challenge_id"])
             nonce_prefix = str(challenge["nonce_prefix"])
             difficulty_bits = int(challenge.get("difficulty_bits", 16))
+            if (
+                difficulty_bits < MIN_POW_DIFFICULTY_BITS
+                or difficulty_bits > MAX_POW_DIFFICULTY_BITS
+            ):
+                raise ValueError(
+                    f"Hub requested unsupported PoW difficulty_bits={difficulty_bits} "
+                    f"(allowed {MIN_POW_DIFFICULTY_BITS}..{MAX_POW_DIFFICULTY_BITS})"
+                )
 
-            solution = await asyncio.to_thread(solve_pow, nonce_prefix, difficulty_bits)
+            solution = await asyncio.to_thread(
+                solve_pow, nonce_prefix, difficulty_bits, MAX_POW_ATTEMPTS
+            )
 
             payload = {
                 "challenge_id": challenge_id,
                 "solution": solution,
                 "client_version": self.client_version,
             }
-            async with session.post(self._api_url("/instances/register"), json=payload) as resp:
-                resp.raise_for_status()
+            async with session.post(
+                self._api_url("/instances/register"),
+                json=payload,
+                allow_redirects=False,
+            ) as resp:
+                _raise_for_status_no_redirect(resp)
                 reg = await resp.json()
 
             instance_id = str(reg["instance_id"])
@@ -239,6 +317,17 @@ class HubSource(BaseSource):
             headers["X-User-Token"] = self.user_token
         return headers
 
+    def _evict_tombstoned_items(self, item_ids: list[str]) -> int:
+        """Read cached items to evict on-disk media before deleting them from SQLite."""
+        if not item_ids:
+            return 0
+        if self.media_cache is not None:
+            cached_items = self.db.get_items_by_hub_item_ids(self.hub_id, item_ids)
+            for item in cached_items:
+                for url in extract_media_urls_from_item(item):
+                    self.media_cache.evict_url(url)
+        return self.db.delete_items_by_hub_item_ids(self.hub_id, item_ids)
+
     # ------------------------------------------------------------------
     # Incremental /feed sync with ETag/304 & tombstone eviction
     # ------------------------------------------------------------------
@@ -259,9 +348,11 @@ class HubSource(BaseSource):
             new_items: list[MemeItem] = []
             total_tombstones = 0
             not_modified = False
+            reauth_attempts = 0
+            pages_fetched = 0
             session = await self._get_session()
 
-            for page in range(max_pages):
+            while pages_fetched < max_pages:
                 params: dict[str, Any] = {
                     "after_seq": after_seq,
                     "limit": max(1, min(int(limit), 50)),
@@ -273,22 +364,29 @@ class HubSource(BaseSource):
                     params["exclude_tags"] = ",".join(self.exclude_tags)
 
                 req_headers = dict(headers)
-                if page == 0 and etag:
+                if pages_fetched == 0 and etag:
                     req_headers["If-None-Match"] = etag
 
                 async with session.get(
-                    self._api_url("/feed"), params=params, headers=req_headers
+                    self._api_url("/feed"),
+                    params=params,
+                    headers=req_headers,
+                    allow_redirects=False,
                 ) as resp:
                     if resp.status == 304:
                         not_modified = True
                         self._record_success()
                         break
                     if resp.status == 401:
-                        # Token invalidated; re-register once and retry next cycle
+                        if reauth_attempts >= 1:
+                            raise RuntimeError(
+                                "Hub authentication failed after re-registration (HTTP 401)"
+                            )
+                        reauth_attempts += 1
                         await self.ensure_registered(force=True)
                         headers = await self._auth_headers()
                         continue
-                    resp.raise_for_status()
+                    _raise_for_status_no_redirect(resp)
                     new_etag = resp.headers.get("ETag") or etag
                     data = await resp.json()
 
@@ -302,14 +400,13 @@ class HubSource(BaseSource):
 
                 tombstones = [str(t) for t in (data.get("tombstones") or []) if t]
                 if tombstones:
-                    total_tombstones += self.db.delete_items_by_hub_item_ids(
-                        self.hub_id, tombstones
-                    )
+                    total_tombstones += self._evict_tombstoned_items(tombstones)
 
                 next_seq = int(data.get("next_seq", after_seq))
                 has_more = bool(data.get("has_more", False))
                 after_seq = max(after_seq, next_seq)
                 etag = new_etag
+                pages_fetched += 1
 
                 self._record_success(next_seq=after_seq, etag=etag)
                 if not has_more:
@@ -365,9 +462,12 @@ class HubSource(BaseSource):
 
             session = await self._get_session()
             async with session.get(
-                self._api_url("/random"), params=params, headers=headers
+                self._api_url("/random"),
+                params=params,
+                headers=headers,
+                allow_redirects=False,
             ) as resp:
-                resp.raise_for_status()
+                _raise_for_status_no_redirect(resp)
                 data = await resp.json()
 
             items: list[MemeItem] = []
@@ -390,11 +490,15 @@ class HubSource(BaseSource):
     async def get_item(self, item_id: str) -> Optional[MemeItem]:
         headers = await self._auth_headers()
         session = await self._get_session()
-        async with session.get(self._api_url(f"/items/{item_id}"), headers=headers) as resp:
+        async with session.get(
+            self._api_url(f"/items/{item_id}"),
+            headers=headers,
+            allow_redirects=False,
+        ) as resp:
             if resp.status in (404, 410):
-                self.db.delete_items_by_hub_item_ids(self.hub_id, [item_id])
+                self._evict_tombstoned_items([item_id])
                 return None
-            resp.raise_for_status()
+            _raise_for_status_no_redirect(resp)
             data = await resp.json()
         item = MemeItem.from_dict(data, source_type="hub")
         if not item.hub_id:
@@ -410,15 +514,20 @@ class HubSource(BaseSource):
         data: bytes,
         filename: str = "upload.bin",
         content_type: str = "application/octet-stream",
+        *,
+        include_user_token: bool = False,
     ) -> dict[str, Any]:
-        headers = await self._auth_headers(include_user_token=True)
+        headers = await self._auth_headers(include_user_token=include_user_token)
         form = aiohttp.FormData()
         form.add_field("file", data, filename=filename, content_type=content_type)
         session = await self._get_session()
         async with session.post(
-            self._api_url("/submissions/media"), data=form, headers=headers
+            self._api_url("/submissions/media"),
+            data=form,
+            headers=headers,
+            allow_redirects=False,
         ) as resp:
-            resp.raise_for_status()
+            _raise_for_status_no_redirect(resp)
             return await resp.json()
 
     async def submit_item(
@@ -427,8 +536,9 @@ class HubSource(BaseSource):
         *,
         title: str = "",
         tags: Optional[list[str]] = None,
+        include_user_token: bool = False,
     ) -> dict[str, Any]:
-        headers = await self._auth_headers(include_user_token=True)
+        headers = await self._auth_headers(include_user_token=include_user_token)
         payload: dict[str, Any] = {"blocks": blocks}
         if title:
             payload["title"] = title
@@ -436,9 +546,12 @@ class HubSource(BaseSource):
             payload["tags"] = list(tags)
         session = await self._get_session()
         async with session.post(
-            self._api_url("/submissions"), json=payload, headers=headers
+            self._api_url("/submissions"),
+            json=payload,
+            headers=headers,
+            allow_redirects=False,
         ) as resp:
-            resp.raise_for_status()
+            _raise_for_status_no_redirect(resp)
             return await resp.json()
 
     async def send_feedback_batch(self, events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -449,7 +562,10 @@ class HubSource(BaseSource):
         headers = await self._auth_headers()
         session = await self._get_session()
         async with session.post(
-            self._api_url("/feedback/batch"), json={"events": events}, headers=headers
+            self._api_url("/feedback/batch"),
+            json={"events": events},
+            headers=headers,
+            allow_redirects=False,
         ) as resp:
-            resp.raise_for_status()
+            _raise_for_status_no_redirect(resp)
             return await resp.json()

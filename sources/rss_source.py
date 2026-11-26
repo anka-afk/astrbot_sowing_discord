@@ -8,21 +8,38 @@ import logging
 import re
 import time
 import xml.etree.ElementTree as ET
-from typing import Optional
+from typing import Optional, Sequence
 
 import aiohttp
 
 try:
+    import defusedxml.ElementTree as _SAFE_ET  # type: ignore
+except ImportError:
+    _SAFE_ET = None
+
+try:
     from ..models.meme import MemeAttribution, MemeBlock, MemeItem
     from ..storage.db import SowingDB
+    from ..utils.net_safety import (
+        create_safe_http_session,
+        is_public_http_url_literal,
+        safe_fetch,
+    )
 except ImportError:
     from models.meme import MemeAttribution, MemeBlock, MemeItem
     from storage.db import SowingDB
+    from utils.net_safety import (
+        create_safe_http_session,
+        is_public_http_url_literal,
+        safe_fetch,
+    )
 
 from .base import BaseSource, SyncResult
 
 logger = logging.getLogger(__name__)
 
+MAX_RSS_BYTES = 5 * 1024 * 1024  # 5 MB
+_FORBIDDEN_XML_DECL_RE = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
 _IMG_SRC_RE = re.compile(r'<img\b[^>]*?\bsrc=["\']([^"\']+)["\']', re.IGNORECASE)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
@@ -48,7 +65,7 @@ def _extract_images_from_html(raw_html: str) -> list[str]:
     urls: list[str] = []
     for match in _IMG_SRC_RE.findall(raw_html):
         url = html.unescape(match).strip()
-        if url.startswith(("http://", "https://")) and url not in urls:
+        if is_public_http_url_literal(url) and url not in urls:
             urls.append(url)
     return urls
 
@@ -66,8 +83,16 @@ def parse_feed_xml(
     default_tags: Optional[list[str]] = None,
     max_items: int = 30,
 ) -> list[MemeItem]:
-    """Parse RSS 2.0 or Atom XML into normalized MemeItem objects."""
-    root = ET.fromstring(xml_text)
+    """Parse RSS 2.0 or Atom XML into normalized MemeItem objects (hardened against XXE/DTD bombs)."""
+    if not isinstance(xml_text, str) or not xml_text.strip():
+        return []
+    if len(xml_text.encode("utf-8")) > MAX_RSS_BYTES:
+        raise ValueError(f"RSS XML payload exceeds maximum allowed size ({MAX_RSS_BYTES} bytes)")
+    if _FORBIDDEN_XML_DECL_RE.search(xml_text):
+        raise ValueError("Rejected XML containing forbidden DOCTYPE or ENTITY declaration")
+
+    xml_parser = _SAFE_ET if _SAFE_ET is not None else ET
+    root = xml_parser.fromstring(xml_text)
     root_name = _local_name(root.tag)
     items: list[MemeItem] = []
     base_tags = list(default_tags or [])
@@ -120,14 +145,14 @@ def parse_feed_xml(
                 elif lname == "enclosure":
                     url = (child.attrib.get("url") or "").strip()
                     mtype = (child.attrib.get("type") or "").strip()
-                    if url.startswith(("http://", "https://")) and (
+                    if is_public_http_url_literal(url) and (
                         mtype.startswith("image/") or url.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp"))
                     ):
                         media_urls.append((url, mtype))
                 elif lname in ("content", "thumbnail") and "media" in child.tag.lower():
                     url = (child.attrib.get("url") or "").strip()
                     mtype = (child.attrib.get("type") or "").strip()
-                    if url.startswith(("http://", "https://")):
+                    if is_public_http_url_literal(url):
                         media_urls.append((url, mtype))
 
             html_body = content_html or desc_html
@@ -209,7 +234,7 @@ def parse_feed_xml(
                     href = (child.attrib.get("href") or "").strip()
                     rel = (child.attrib.get("rel") or "alternate").strip()
                     ltype = (child.attrib.get("type") or "").strip()
-                    if rel == "enclosure" and href.startswith(("http://", "https://")) and ltype.startswith("image/"):
+                    if rel == "enclosure" and is_public_http_url_literal(href) and ltype.startswith("image/"):
                         media_urls.append((href, ltype))
                     elif rel == "alternate" and href and not link:
                         link = href
@@ -269,20 +294,28 @@ class RssSource(BaseSource):
         enabled: bool = True,
         default_tags: Optional[list[str]] = None,
         timeout_sec: float = 15.0,
+        max_bytes: int = MAX_RSS_BYTES,
         session: Optional[aiohttp.ClientSession] = None,
+        trusted_origins: Sequence[str] = (),
     ):
         super().__init__(source_id=source_id, enabled=enabled)
         self.feed_url = feed_url
         self.db = db
         self.default_tags = list(default_tags or ["RSS"])
         self.timeout_sec = timeout_sec
+        self.max_bytes = max(1024, int(max_bytes))
+        self.trusted_origins: tuple[str, ...] = tuple(
+            str(o).strip() for o in (trusted_origins or ()) if str(o).strip()
+        )
         self._external_session = session is not None
         self._session = session
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=self.timeout_sec)
-            self._session = aiohttp.ClientSession(timeout=timeout)
+            self._session = create_safe_http_session(
+                timeout=self.timeout_sec,
+                trusted_origins=self.trusted_origins,
+            )
             self._external_session = False
         return self._session
 
@@ -306,15 +339,22 @@ class RssSource(BaseSource):
 
         try:
             session = await self._get_session()
-            async with session.get(self.feed_url, headers=headers) as resp:
-                if resp.status == 304:
-                    self.db.upsert_source_cursor(
-                        self.source_id, fail_count=0, backoff_until=0, last_sync_at=now
-                    )
-                    return SyncResult(source_id=self.source_id, not_modified=True)
-                resp.raise_for_status()
-                new_etag = resp.headers.get("ETag") or etag
-                xml_text = await resp.text()
+            res = await safe_fetch(
+                session,
+                self.feed_url,
+                max_bytes=self.max_bytes,
+                timeout=self.timeout_sec,
+                headers=headers,
+                allow_not_modified=True,
+                trusted_origins=self.trusted_origins,
+            )
+            if res.status == 304:
+                self.db.upsert_source_cursor(
+                    self.source_id, fail_count=0, backoff_until=0, last_sync_at=now
+                )
+                return SyncResult(source_id=self.source_id, not_modified=True)
+            new_etag = res.headers.get("etag") or etag
+            xml_text = res.data.decode("utf-8", errors="replace")
 
             parsed = parse_feed_xml(xml_text, self.source_id, default_tags=self.default_tags)
             new_items: list[MemeItem] = []

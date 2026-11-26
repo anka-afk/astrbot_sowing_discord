@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from pathlib import Path
 from typing import Any
@@ -203,7 +204,7 @@ async def test_submit_two_step_video_block_and_duplicate_early_stop(tmp_path: Pa
         assert "暂不支持投稿原始视频" in vid_res.message
         assert state["uploads"] == []
 
-        # 2. Normal two-step submission with anonymized chat_record + image + X-User-Token
+        # 2. Normal two-step submission with anonymized chat_record + image + X-User-Token (bot admin)
         ok_res = await handler.submit(
             title="绝世好活",
             tags=["沙雕"],
@@ -217,6 +218,7 @@ async def test_submit_two_step_video_block_and_duplicate_early_stop(tmp_path: Pa
                     ],
                 }
             ],
+            is_bot_admin=True,
         )
         assert ok_res.ok is True
         assert ok_res.submission_id == "sub-001"
@@ -315,8 +317,10 @@ async def test_feedback_blinding_signals_and_batch_flush(tmp_path: Path) -> None
         assert rep.ok is True
         assert rep.reason == "privacy_leak"
 
-        # Verify exact blinding hash formula: sha256(instance_salt + group_id + user_id)
-        expected_voter_hash = hashlib.sha256(f"{salt}555000u300".encode("utf-8")).hexdigest()
+        # Verify exact blinding hash formula: HMAC-SHA256(key=instance_salt, msg=f"{group_id}:{user_id}")
+        expected_voter_hash = hmac.new(
+            salt.encode("utf-8"), b"555000:u300", hashlib.sha256
+        ).hexdigest()
         assert compute_voter_hash(salt, "555000", "u300") == expected_voter_hash
 
         # Flush batch to Hub
