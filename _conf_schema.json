@@ -9,7 +9,7 @@
     "description": "官方 Hub 地址",
     "type": "string",
     "hint": "官方公益 Hub API 根地址（不含 /api/v1 后缀）",
-    "default": "https://api.banshi.ankaanka.org"
+    "default": "https://banshi-api.ankaanka.org"
   },
   "user_token": {
     "description": "可信投稿人令牌 (X-User-Token)",

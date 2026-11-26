@@ -29,7 +29,7 @@
 
 ## ⚙️ 主要配置项（AstrBot WebUI 可视化配置）
 
-- `official_hub_enabled` / `official_hub_url`：是否启用官方 Hub 及 API 根地址（默认 `https://api.banshi.ankaanka.org`，可随时指向自建 Hub）。
+- `official_hub_enabled` / `official_hub_url`：是否启用官方 Hub 及 API 根地址（默认 `https://banshi-api.ankaanka.org`，可随时指向自建 Hub）。
 - `extra_hubs` / `rss_sources`：追加多个联邦 Hub 或 RSS/RSSHub 图文源。
 - `local_onebot_groups` / `local_emoji_threshold`：可选本地事件驱动源群与贴表情阈值。
 - `target_groups` / `default_max_nsfw` / `default_blocked_tags`：目标搬史群、内容分级上限（`0` 安全 / `1` 轻度敏感 / `2` 高能预警）及屏蔽标签。

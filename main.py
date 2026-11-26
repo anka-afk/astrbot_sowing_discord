@@ -305,7 +305,7 @@ class SowingDiscordPlugin(Star):
     def _init_sources(self) -> None:
         if bool(self.config.get("official_hub_enabled", True)):
             official_url = str(
-                self.config.get("official_hub_url", "https://api.banshi.ankaanka.org")
+                self.config.get("official_hub_url", "https://banshi-api.ankaanka.org")
             ).strip()
             if official_url:
                 official = HubSource(
