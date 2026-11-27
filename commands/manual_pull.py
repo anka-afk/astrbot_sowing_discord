@@ -130,7 +130,10 @@ class ManualPullHandler:
 
         if item is None:
             hint = f"（标签：{clean_tag}）" if clean_tag else ""
-            return PullResult(ok=False, message=f"史库暂时掏空了{hint}，稍后再试或使用 /投稿 投喂新史吧~")
+            return PullResult(
+                ok=False,
+                message=f"史库暂时掏空了{hint}，稍后再试，或使用 /投稿 / 前往 https://banshi.ankaanka.org 投喂新史吧~",
+            )
 
         comment = await self.commentary.generate(
             item, probability=float(settings.get("llm_comment_prob", 0.3))

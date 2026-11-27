@@ -123,6 +123,7 @@ class AdminHandler:
             f"本群分级上限：{_NSFW_LABELS.get(int(cfg['max_nsfw']), str(cfg['max_nsfw']))}",
             f"本群屏蔽标签：{', '.join(cfg['blocked_tags']) if cfg['blocked_tags'] else '无'}",
             f"当前读空气状态：{air.state.value}（{air.reason}）",
+            "史库广场 & 网页投稿：https://banshi.ankaanka.org",
         ]
         if self.migration_report and self.migration_report.migrated:
             lines.append(f"【迁移提示】{self.migration_report.summary}")
